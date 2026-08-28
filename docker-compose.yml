@@ -1,0 +1,37 @@
+# Kickoff local development database.
+#
+# Deliberately isolated from anything else running on this machine:
+#   - non-default host port 5433 (5432 is left free)
+#   - its own named volume
+#   - run it with an explicit project name so it can never be grouped with
+#     other compose projects:
+#
+#       docker compose -p kickoff up -d
+#       docker compose -p kickoff down          # stop, keep data
+#       docker compose -p kickoff down -v       # stop AND DELETE all data
+#
+# This file starts Postgres only. Redis is added when caching/queues land;
+# do not point Kickoff at another project's Redis instance.
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    container_name: kickoff-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: kickoff
+      POSTGRES_PASSWORD: kickoff
+      POSTGRES_DB: kickoff
+    ports:
+      - '5433:5432'
+    volumes:
+      - kickoff-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U kickoff -d kickoff']
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  kickoff-pgdata:
+    name: kickoff-pgdata

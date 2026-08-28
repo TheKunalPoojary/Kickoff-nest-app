@@ -1,0 +1,511 @@
+// Kickoff — multi-venue turf & arcade booking marketplace
+//
+// Design notes that are easy to lose:
+//  - All money is INTEGER PAISE. Never Float, never Decimal-for-money.
+//  - All instants are timestamptz (UTC). Venue-local rendering uses Venue.timezone.
+//  - Overlapping bookings are prevented by a Postgres EXCLUSION CONSTRAINT that
+//    Prisma cannot express. See prisma/migrations/*_booking_constraints/.
+//    Do not "improve" this by adding an application-level availability check —
+//    check-then-insert is racy and is exactly how double-bookings happen.
+
+generator client {
+  provider     = "prisma-client"
+  output       = "../src/generated/prisma"
+  moduleFormat = "esm"
+}
+
+// Prisma 7: the connection URL lives in prisma.config.ts (for migrate/introspect)
+// and is supplied to PrismaClient at runtime via the pg driver adapter.
+datasource db {
+  provider = "postgresql"
+}
+
+enum ResourceKind {
+  TURF
+  ARCADE
+}
+
+enum BookingStatus {
+  PENDING_PAYMENT
+  CONFIRMED
+  CANCELLED
+  COMPLETED
+  EXPIRED
+  NO_SHOW
+}
+
+enum PaymentStatus {
+  CREATED
+  AUTHORIZED
+  PAID
+  FAILED
+  REFUND_PENDING
+  REFUNDED
+  PARTIALLY_REFUNDED
+}
+
+enum UserRole {
+  USER
+  VENUE_OWNER
+  VENUE_STAFF
+  ADMIN
+  SUPPORT
+}
+
+enum VenueStatus {
+  PENDING_APPROVAL
+  ACTIVE
+  SUSPENDED
+}
+
+enum MatchVisibility {
+  PUBLIC
+  SQUAD_ONLY
+}
+
+enum MatchStatus {
+  OPEN
+  FULL
+  CANCELLED
+  COMPLETED
+}
+
+enum JoinStatus {
+  REQUESTED
+  ACCEPTED
+  DECLINED
+  LEFT
+}
+
+enum SquadRole {
+  CAPTAIN
+  MEMBER
+}
+
+enum PayoutStatus {
+  PENDING
+  PROCESSING
+  PAID
+  FAILED
+}
+
+// ---------------------------------------------------------------- identity
+
+model User {
+  id              String    @id @default(uuid())
+  phone           String?   @unique
+  email           String?   @unique
+  name            String?
+  avatarUrl       String?
+  role            UserRole  @default(USER)
+  city            String?
+  preferredSports String[]
+  isBlocked       Boolean   @default(false)
+  noShowCount     Int       @default(0)
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+  deletedAt       DateTime?
+
+  identities   SocialIdentity[]
+  devices      Device[]
+  sessions     RefreshSession[]
+  venues       Venue[]
+  bookings     Booking[]
+  reviews      Review[]
+  squadLinks   SquadMember[]
+  squadsOwned  Squad[]
+  matchesHosted Match[]
+  matchSeats   MatchPlayer[]
+
+  @@index([deletedAt])
+  @@index([role])
+}
+
+model SocialIdentity {
+  id         String   @id @default(uuid())
+  userId     String
+  provider   String // google | apple
+  providerId String
+  createdAt  DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, providerId])
+  @@index([userId])
+}
+
+/// Refresh tokens are stored hashed, in families. Reuse of an already-rotated
+/// token revokes the entire family — that is the theft signal.
+model RefreshSession {
+  id         String    @id @default(uuid())
+  userId     String
+  tokenHash  String    @unique // SHA-256 of the raw token, never the token
+  familyId   String
+  deviceInfo String?
+  expiresAt  DateTime  @db.Timestamptz
+  revokedAt  DateTime? @db.Timestamptz
+  createdAt  DateTime  @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, revokedAt])
+  @@index([familyId])
+}
+
+model Device {
+  id            String   @id @default(uuid())
+  userId        String
+  expoPushToken String   @unique
+  platform      String
+  lastSeenAt    DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+// ---------------------------------------------------------------- catalog
+
+model Venue {
+  id            String      @id @default(uuid())
+  ownerId       String
+  name          String
+  slug          String
+  description   String?
+  addressLine   String
+  city          String
+  state         String
+  pincode       String
+  lat           Float
+  lng           Float
+  /// IANA name (e.g. "Asia/Kolkata"), never a numeric offset — offsets are
+  /// wrong twice a year anywhere with DST.
+  timezone      String      @default("Asia/Kolkata")
+  photos        String[]
+  amenities     String[]
+  contactPhone  String
+  status        VenueStatus @default(PENDING_APPROVAL)
+  ratingAvg     Float       @default(0)
+  ratingCount   Int         @default(0)
+  commissionPct Decimal     @default(10.00) @db.Decimal(5, 2)
+  createdAt     DateTime    @default(now())
+  updatedAt     DateTime    @updatedAt
+  deletedAt     DateTime?
+
+  owner     User             @relation(fields: [ownerId], references: [id])
+  resources Resource[]
+  hours     OperatingHours[]
+  reviews   Review[]
+  payouts   Payout[]
+
+  @@index([city, status])
+  @@index([ownerId])
+  @@index([lat, lng])
+  @@index([deletedAt])
+}
+
+/// One bookable unit: a 5-a-side pitch, a bowling lane, a VR booth.
+/// Turf and arcade differ only in `attributes` and slot shape — the booking
+/// engine treats them identically.
+model Resource {
+  id               String       @id @default(uuid())
+  venueId          String
+  kind             ResourceKind
+  name             String
+  /// TURF: { sport, surface, format } — ARCADE: { game, capacity }
+  attributes       Json         @default("{}")
+  slotDurationMins Int          @default(60)
+  /// Cleanup gap enforced by widening the stored booking range.
+  bufferMins       Int          @default(0)
+  basePricePaise   Int
+  maxPlayers       Int?
+  isActive         Boolean      @default(true)
+  createdAt        DateTime     @default(now())
+  updatedAt        DateTime     @updatedAt
+  deletedAt        DateTime?
+
+  venue      Venue       @relation(fields: [venueId], references: [id])
+  priceRules PriceRule[]
+  blackouts  Blackout[]
+  bookings   Booking[]
+
+  @@index([venueId, isActive])
+  @@index([kind])
+  @@index([deletedAt])
+}
+
+model OperatingHours {
+  id      String @id @default(uuid())
+  venueId String
+  /// 0 = Sunday … 6 = Saturday
+  weekday Int
+  /// Minutes from LOCAL midnight. closesAt may exceed 1440 for venues that
+  /// close after midnight (opens 06:00, closes 02:00 → 360 / 1560).
+  opensAt Int
+  closesAt Int
+
+  venue Venue @relation(fields: [venueId], references: [id], onDelete: Cascade)
+
+  @@unique([venueId, weekday])
+}
+
+/// Peak / off-peak overrides. Highest `priority` wins where rules overlap;
+/// falls back to Resource.basePricePaise.
+model PriceRule {
+  id          String    @id @default(uuid())
+  resourceId  String
+  name        String
+  /// Bitmask of applicable weekdays, Sunday = bit 0.
+  weekdayMask Int
+  startMin    Int
+  endMin      Int
+  pricePaise  Int
+  priority    Int       @default(0)
+  validFrom   DateTime? @db.Timestamptz
+  validUntil  DateTime? @db.Timestamptz
+
+  resource Resource @relation(fields: [resourceId], references: [id], onDelete: Cascade)
+
+  @@index([resourceId])
+}
+
+/// Maintenance windows and private events. Subtracted from generated slots.
+model Blackout {
+  id         String   @id @default(uuid())
+  resourceId String
+  startsAt   DateTime @db.Timestamptz
+  endsAt     DateTime @db.Timestamptz
+  reason     String?
+  createdBy  String
+  createdAt  DateTime @default(now())
+
+  resource Resource @relation(fields: [resourceId], references: [id], onDelete: Cascade)
+
+  @@index([resourceId, startsAt])
+}
+
+// ---------------------------------------------------------------- booking
+
+/// A PENDING_PAYMENT row IS the slot lock — it participates in the exclusion
+/// constraint, so it is durable across restarts. `holdsUntil` bounds it.
+/// Never soft-delete: bookings are financial records, use status transitions.
+model Booking {
+  id               String        @id @default(uuid())
+  /// Human-readable, for support conversations ("KO-8F3K2").
+  bookingCode      String        @unique
+  userId           String
+  resourceId       String
+  startsAt         DateTime      @db.Timestamptz
+  endsAt           DateTime      @db.Timestamptz
+  status           BookingStatus
+  amountPaise      Int
+  platformFeePaise Int           @default(0)
+  taxPaise         Int           @default(0)
+  holdsUntil       DateTime?     @db.Timestamptz
+  /// Collapses client retries (double-tap, crash-and-reopen, network flap).
+  idempotencyKey   String?       @unique
+  cancelledAt      DateTime?     @db.Timestamptz
+  cancelledBy      String?
+  cancelReason     String?
+  checkedInAt      DateTime?     @db.Timestamptz
+  createdAt        DateTime      @default(now())
+  updatedAt        DateTime      @updatedAt
+
+  user          User          @relation(fields: [userId], references: [id])
+  resource      Resource      @relation(fields: [resourceId], references: [id])
+  payment       Payment?
+  match         Match?
+  review        Review?
+  ledgerEntries LedgerEntry[]
+
+  @@index([userId, status])
+  @@index([resourceId, startsAt])
+  @@index([status, holdsUntil])
+  @@index([startsAt])
+}
+
+// ---------------------------------------------------------------- money
+
+model Payment {
+  id                String        @id @default(uuid())
+  bookingId         String        @unique
+  provider          String        @default("razorpay")
+  providerOrderId   String        @unique
+  providerPaymentId String?       @unique
+  amountPaise       Int
+  refundedPaise     Int           @default(0)
+  status            PaymentStatus
+  method            String?
+  failureReason     String?
+  rawPayload        Json?
+  createdAt         DateTime      @default(now())
+  updatedAt         DateTime      @updatedAt
+
+  booking Booking @relation(fields: [bookingId], references: [id])
+
+  @@index([status])
+}
+
+/// Dedupe + audit for provider webhooks. Razorpay retries, so handlers must be
+/// idempotent; the unique constraint is what makes that true. Also the basis of
+/// disaster recovery — unprocessed rows can be replayed.
+model WebhookEvent {
+  id          String    @id @default(uuid())
+  provider    String
+  eventId     String
+  eventType   String
+  payload     Json
+  processedAt DateTime?
+  error       String?
+  receivedAt  DateTime  @default(now())
+
+  @@unique([provider, eventId])
+  @@index([processedAt])
+}
+
+/// Double-entry: every transaction's entries must sum to zero.
+/// Accounts: PLATFORM_CASH | OWNER_PAYABLE:<venueId> | USER_REFUND | COMMISSION | TAX
+model LedgerEntry {
+  id          String   @id @default(uuid())
+  bookingId   String?
+  account     String
+  direction   String // DEBIT | CREDIT
+  amountPaise Int
+  currency    String   @default("INR")
+  refType     String // BOOKING | REFUND | PAYOUT | ADJUSTMENT
+  refId       String
+  createdAt   DateTime @default(now())
+
+  booking Booking? @relation(fields: [bookingId], references: [id])
+
+  @@index([account, createdAt])
+  @@index([refType, refId])
+  @@index([bookingId])
+}
+
+model Payout {
+  id               String       @id @default(uuid())
+  venueId          String
+  periodStart      DateTime     @db.Timestamptz
+  periodEnd        DateTime     @db.Timestamptz
+  grossPaise       Int
+  commissionPaise  Int
+  netPaise         Int
+  status           PayoutStatus @default(PENDING)
+  providerPayoutId String?
+  paidAt           DateTime?    @db.Timestamptz
+  createdAt        DateTime     @default(now())
+
+  venue Venue @relation(fields: [venueId], references: [id])
+
+  @@index([venueId, status])
+}
+
+// ---------------------------------------------------------------- social
+
+model Squad {
+  id        String    @id @default(uuid())
+  name      String
+  ownerId   String
+  avatarUrl String?
+  sport     String?
+  createdAt DateTime  @default(now())
+  deletedAt DateTime?
+
+  owner   User          @relation(fields: [ownerId], references: [id])
+  members SquadMember[]
+  matches Match[]
+
+  @@index([ownerId])
+}
+
+model SquadMember {
+  squadId  String
+  userId   String
+  role     SquadRole @default(MEMBER)
+  joinedAt DateTime  @default(now())
+
+  squad Squad @relation(fields: [squadId], references: [id], onDelete: Cascade)
+  user  User  @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@id([squadId, userId])
+  @@index([userId])
+}
+
+/// An open game. Always backed by a real Booking — you cannot advertise a match
+/// for a slot nobody has paid to hold.
+model Match {
+  id                 String          @id @default(uuid())
+  bookingId          String          @unique
+  hostId             String
+  squadId            String?
+  title              String?
+  visibility         MatchVisibility @default(PUBLIC)
+  slotsTotal         Int
+  costPerPlayerPaise Int
+  skillLevel         String?
+  status             MatchStatus     @default(OPEN)
+  createdAt          DateTime        @default(now())
+  updatedAt          DateTime        @updatedAt
+
+  booking Booking       @relation(fields: [bookingId], references: [id])
+  host    User          @relation(fields: [hostId], references: [id])
+  squad   Squad?        @relation(fields: [squadId], references: [id])
+  players MatchPlayer[]
+
+  @@index([status, visibility])
+  @@index([hostId])
+}
+
+model MatchPlayer {
+  matchId   String
+  userId    String
+  status    JoinStatus @default(REQUESTED)
+  paidPaise Int        @default(0)
+  joinedAt  DateTime   @default(now())
+
+  match Match @relation(fields: [matchId], references: [id], onDelete: Cascade)
+  user  User  @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@id([matchId, userId])
+  @@index([userId])
+}
+
+model Review {
+  id         String    @id @default(uuid())
+  venueId    String
+  userId     String
+  /// Reviews are gated on a real COMPLETED booking — no drive-by ratings.
+  bookingId  String    @unique
+  rating     Int
+  comment    String?
+  photos     String[]
+  ownerReply String?
+  createdAt  DateTime  @default(now())
+  updatedAt  DateTime  @updatedAt
+  deletedAt  DateTime?
+
+  venue   Venue   @relation(fields: [venueId], references: [id])
+  user    User    @relation(fields: [userId], references: [id])
+  booking Booking @relation(fields: [bookingId], references: [id])
+
+  @@unique([venueId, userId])
+  @@index([venueId, createdAt])
+}
+
+/// Who overrode what. Disputes are unresolvable without this.
+model AuditLog {
+  id         String   @id @default(uuid())
+  actorId    String
+  actorRole  String
+  action     String
+  entityType String
+  entityId   String
+  before     Json?
+  after      Json?
+  ip         String?
+  createdAt  DateTime @default(now())
+
+  @@index([entityType, entityId])
+  @@index([actorId, createdAt])
+}
