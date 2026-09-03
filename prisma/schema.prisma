@@ -152,6 +152,22 @@ model RefreshSession {
   @@index([familyId])
 }
 
+/// Short-lived phone verification challenge. Codes are stored hashed so a
+/// database dump does not hand over live login codes. Rate limiting counts
+/// rows per phone per hour — SMS costs real money and is the #1 abuse target.
+model OtpChallenge {
+  id         String    @id @default(uuid())
+  phone      String
+  codeHash   String
+  expiresAt  DateTime  @db.Timestamptz
+  attempts   Int       @default(0)
+  consumedAt DateTime? @db.Timestamptz
+  createdAt  DateTime  @default(now())
+
+  @@index([phone, createdAt])
+  @@index([expiresAt])
+}
+
 model Device {
   id            String   @id @default(uuid())
   userId        String
@@ -289,6 +305,12 @@ model Blackout {
 /// A PENDING_PAYMENT row IS the slot lock — it participates in the exclusion
 /// constraint, so it is durable across restarts. `holdsUntil` bounds it.
 /// Never soft-delete: bookings are financial records, use status transitions.
+///
+/// IMPORTANT — `endsAt` is the play window PLUS the resource's trailing
+/// `bufferMins` cleanup gap. Storing the widened range is what lets the
+/// exclusion constraint enforce the gap; an application-level buffer check
+/// would be racy in exactly the way the constraint exists to prevent.
+/// Display the play end as `endsAt - resource.bufferMins`.
 model Booking {
   id               String        @id @default(uuid())
   /// Human-readable, for support conversations ("KO-8F3K2").

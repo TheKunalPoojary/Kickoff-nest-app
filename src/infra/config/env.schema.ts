@@ -25,8 +25,20 @@ export const envSchema = z.object({
    */
   BOOKING_HOLD_MINUTES: z.coerce.number().int().positive().default(10),
 
+  /** Phone verification. Codes are short-lived and attempt-capped. */
+  OTP_TTL_MINUTES: z.coerce.number().int().positive().default(5),
+  OTP_MAX_ATTEMPTS: z.coerce.number().int().positive().default(5),
+  /** Per phone, per hour. SMS costs money — this is the abuse ceiling. */
+  OTP_MAX_REQUESTS_PER_HOUR: z.coerce.number().int().positive().default(3),
+
   REDIS_URL: z.string().optional(),
 
+  /**
+   * Optional so local development can run without payments configured, but
+   * required in production — see the check below. An empty webhook secret
+   * makes signature verification fail closed, which is safe but presents as a
+   * mysterious 403 on every callback.
+   */
   RAZORPAY_KEY_ID: z.string().optional(),
   RAZORPAY_KEY_SECRET: z.string().optional(),
   RAZORPAY_WEBHOOK_SECRET: z.string().optional(),
@@ -49,6 +61,18 @@ export function validateEnv(raw: Record<string, unknown>): Env {
     for (const key of ['JWT_ACCESS_SECRET', 'JWT_REFRESH_SECRET'] as const) {
       if (parsed.data[key].startsWith('change-me')) {
         throw new Error(`${key} still holds its placeholder value in production`);
+      }
+    }
+
+    // Fail at boot rather than at the first checkout, and rather than
+    // returning 403 on every webhook because the HMAC key is empty.
+    for (const key of [
+      'RAZORPAY_KEY_ID',
+      'RAZORPAY_KEY_SECRET',
+      'RAZORPAY_WEBHOOK_SECRET',
+    ] as const) {
+      if (!parsed.data[key]) {
+        throw new Error(`${key} is required in production`);
       }
     }
   }

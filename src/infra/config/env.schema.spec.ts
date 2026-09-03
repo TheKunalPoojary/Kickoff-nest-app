@@ -7,6 +7,13 @@ const base = {
   JWT_REFRESH_SECRET: 'b'.repeat(32),
 };
 
+/** Payments are optional locally but mandatory in production. */
+const productionExtras = {
+  RAZORPAY_KEY_ID: 'rzp_live_x',
+  RAZORPAY_KEY_SECRET: 'secret',
+  RAZORPAY_WEBHOOK_SECRET: 'whsec',
+};
+
 describe('validateEnv', () => {
   it('applies defaults for optional values', () => {
     const env = validateEnv({ ...base });
@@ -53,13 +60,40 @@ describe('validateEnv', () => {
     expect(() =>
       validateEnv({
         ...base,
+        ...productionExtras,
         NODE_ENV: 'production',
         JWT_ACCESS_SECRET: 'change-me-but-long-enough-to-pass-length',
       }),
     ).toThrow(/placeholder/);
   });
 
-  it('allows real secrets in production', () => {
-    expect(() => validateEnv({ ...base, NODE_ENV: 'production' })).not.toThrow();
+  it('requires payment credentials in production', () => {
+    // An empty webhook secret makes signature verification fail closed, which
+    // presents as a mysterious 403 on every callback. Better to refuse to boot.
+    for (const missing of [
+      'RAZORPAY_KEY_ID',
+      'RAZORPAY_KEY_SECRET',
+      'RAZORPAY_WEBHOOK_SECRET',
+    ]) {
+      const env: Record<string, unknown> = {
+        ...base,
+        ...productionExtras,
+        NODE_ENV: 'production',
+      };
+      delete env[missing];
+
+      expect(() => validateEnv(env)).toThrow(new RegExp(`${missing} is required`));
+    }
+  });
+
+  it('does not require payment credentials outside production', () => {
+    // Local development must run without a Razorpay account.
+    expect(() => validateEnv({ ...base, NODE_ENV: 'development' })).not.toThrow();
+  });
+
+  it('allows a fully configured production environment', () => {
+    expect(() =>
+      validateEnv({ ...base, ...productionExtras, NODE_ENV: 'production' }),
+    ).not.toThrow();
   });
 });

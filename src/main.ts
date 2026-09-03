@@ -7,7 +7,9 @@ import { AllExceptionsFilter } from './common/filters/all-exceptions.filter.js';
 import type { Env } from './infra/config/env.schema.js';
 
 async function bootstrap() {
-  const app = await NestFactory.create(AppModule);
+  // rawBody is required to verify the Razorpay webhook HMAC: re-serialising a
+  // parsed body changes the bytes and invalidates the signature.
+  const app = await NestFactory.create(AppModule, { rawBody: true });
   const config = app.get(ConfigService<Env, true>);
 
   // `health` sits outside the version prefix so uptime monitors and the load
