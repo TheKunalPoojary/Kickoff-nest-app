@@ -39,8 +39,11 @@ export class AuthService {
     return createHash('sha256').update(`${phone}:${code}:${pepper}`).digest('hex');
   }
 
-  async requestOtp(phone: string): Promise<OtpRequestResult> {
+  async requestOtp(phone: string, ipAddress?: string): Promise<OtpRequestResult> {
     const maxPerHour = this.config.get('OTP_MAX_REQUESTS_PER_HOUR', { infer: true });
+    const maxPerHourPerIp = this.config.get('OTP_MAX_REQUESTS_PER_HOUR_PER_IP', {
+      infer: true,
+    });
     const oneHourAgo = new Date(Date.now() - 60 * 60 * 1000);
 
     const recent = await this.prisma.otpChallenge.count({
@@ -59,6 +62,25 @@ export class AuthService {
       );
     }
 
+    // Catches what the per-phone limit can't: one attacker spraying requests
+    // across many numbers from a single source. Skipped when the IP is
+    // unknown rather than blocking on a false "unlimited" positive.
+    if (ipAddress) {
+      const recentFromIp = await this.prisma.otpChallenge.count({
+        where: { ipAddress, createdAt: { gte: oneHourAgo } },
+      });
+
+      if (recentFromIp >= maxPerHourPerIp) {
+        throw new HttpException(
+          {
+            code: 'OTP_RATE_LIMITED',
+            message: 'Too many codes requested. Please try again later.',
+          },
+          HttpStatus.TOO_MANY_REQUESTS,
+        );
+      }
+    }
+
     const ttlMinutes = this.config.get('OTP_TTL_MINUTES', { infer: true });
     // randomInt is CSPRNG-backed; Math.random is predictable and must never
     // generate a credential.
@@ -69,6 +91,7 @@ export class AuthService {
         phone,
         codeHash: this.hashCode(phone, code),
         expiresAt: new Date(Date.now() + ttlMinutes * 60 * 1000),
+        ipAddress,
       },
     });
 

@@ -1,4 +1,5 @@
-import { Body, Controller, HttpCode, HttpStatus, Post } from '@nestjs/common';
+import { Body, Controller, HttpCode, HttpStatus, Post, Req } from '@nestjs/common';
+import type { Request } from 'express';
 import { Public } from '../../common/decorators/public.decorator.js';
 import { zodBody } from '../../common/pipes/zod-validation.pipe.js';
 import { AuthService } from './auth.service.js';
@@ -24,8 +25,8 @@ export class AuthController {
   @Public()
   @Post('otp/request')
   @HttpCode(HttpStatus.OK)
-  requestOtp(@Body(zodBody(RequestOtpSchema)) dto: RequestOtpDto) {
-    return this.auth.requestOtp(dto.phone);
+  requestOtp(@Body(zodBody(RequestOtpSchema)) dto: RequestOtpDto, @Req() req: Request) {
+    return this.auth.requestOtp(dto.phone, req.ip);
   }
 
   @Public()

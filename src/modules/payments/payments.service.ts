@@ -1,8 +1,16 @@
-import { ConflictException, Injectable, Logger, NotFoundException } from '@nestjs/common';
+import {
+  ConflictException,
+  ForbiddenException,
+  Injectable,
+  Logger,
+  NotFoundException,
+} from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { PrismaService } from '../../infra/prisma/prisma.service.js';
 import { RazorpayClient } from './razorpay.client.js';
 import { captureLines, isBalanced, refundLines, type LedgerLine } from './ledger.entries.js';
 import { computeRefund } from '../bookings/refund-policy.js';
+import type { Env } from '../../infra/config/env.schema.js';
 
 @Injectable()
 export class PaymentsService {
@@ -11,6 +19,7 @@ export class PaymentsService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly razorpay: RazorpayClient,
+    private readonly config: ConfigService<Env, true>,
   ) {}
 
   /**
@@ -99,6 +108,40 @@ export class PaymentsService {
       /** The client stops polling on this. */
       settled: booking.status === 'CONFIRMED' || booking.payment?.status === 'FAILED',
     };
+  }
+
+  /**
+   * Dev/staging-only stand-in for the Razorpay webhook, for testing checkout
+   * without real payment credentials. Drives the exact same confirmation
+   * transaction and ledger write as `payment.captured` — never bypasses
+   * either — so the only difference from a real payment is who calls it.
+   */
+  async devConfirmPayment(userId: string, bookingId: string) {
+    if (!this.isDevMode()) {
+      throw new ForbiddenException({
+        code: 'DEV_ENDPOINT_DISABLED',
+        message: 'Not available in production.',
+      });
+    }
+
+    const booking = await this.prisma.booking.findFirst({
+      where: { id: bookingId, userId },
+      select: { id: true, payment: { select: { providerOrderId: true, amountPaise: true } } },
+    });
+
+    if (!booking?.payment) {
+      throw new NotFoundException({
+        code: 'PAYMENT_ORDER_NOT_FOUND',
+        message: 'Create a payment order for this booking first.',
+      });
+    }
+
+    await this.confirmPayment({
+      id: `dev_${bookingId}_${Date.now()}`,
+      order_id: booking.payment.providerOrderId,
+      amount: booking.payment.amountPaise,
+      method: 'dev',
+    });
   }
 
   /**
@@ -348,6 +391,10 @@ export class PaymentsService {
     });
 
     return { refunded: true, decision };
+  }
+
+  private isDevMode(): boolean {
+    return this.config.get('NODE_ENV', { infer: true }) !== 'production';
   }
 
   private toLedgerRows(

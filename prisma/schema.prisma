@@ -163,8 +163,11 @@ model OtpChallenge {
   attempts   Int       @default(0)
   consumedAt DateTime? @db.Timestamptz
   createdAt  DateTime  @default(now())
+  /** Request-time client IP, for the per-IP rate limit. Null for older rows. */
+  ipAddress  String?
 
   @@index([phone, createdAt])
+  @@index([ipAddress, createdAt])
   @@index([expiresAt])
 }
 

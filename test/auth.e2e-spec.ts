@@ -61,6 +61,29 @@ describe('auth (e2e)', () => {
   }
 
   describe('otp', () => {
+    it('rate limits one IP spraying requests across many phones', async () => {
+      // Default OTP_MAX_REQUESTS_PER_HOUR_PER_IP is 20 — every request in this
+      // file comes from the same loopback address via supertest, so this runs
+      // FIRST, before any other test's otp/request calls share the quota, and
+      // cleans up its own rows immediately after so later tests start fresh.
+      const phonesUsed: string[] = [];
+      for (let i = 0; i < 20; i++) {
+        const phone = nextPhone();
+        phonesUsed.push(phone);
+        await http().post('/api/v1/auth/otp/request').send({ phone }).expect(200);
+      }
+
+      const blockedPhone = nextPhone();
+      phonesUsed.push(blockedPhone);
+      const res = await http()
+        .post('/api/v1/auth/otp/request')
+        .send({ phone: blockedPhone })
+        .expect(429);
+      expect(res.body.error.code).toBe('OTP_RATE_LIMITED');
+
+      await prisma.otpChallenge.deleteMany({ where: { phone: { in: phonesUsed } } });
+    });
+
     it('rejects a phone number without a country code', async () => {
       const res = await http()
         .post('/api/v1/auth/otp/request')
@@ -143,6 +166,7 @@ describe('auth (e2e)', () => {
       const res = await http().post('/api/v1/auth/otp/request').send({ phone }).expect(429);
       expect(res.body.error.code).toBe('OTP_RATE_LIMITED');
     });
+
   });
 
   describe('guards', () => {

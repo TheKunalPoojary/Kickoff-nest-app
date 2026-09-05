@@ -62,6 +62,21 @@ export class RazorpayClient {
     receipt: string;
     notes?: Record<string, string>;
   }): Promise<RazorpayOrder> {
+    // Dev/staging without real Razorpay credentials: skip the external call
+    // rather than fail every local checkout against placeholder test keys.
+    // Lives here, not in PaymentsService, so it only ever affects the real
+    // client — e2e tests substitute their own RazorpayClient subclass via DI
+    // and never reach this method.
+    if (this.config.get('NODE_ENV', { infer: true }) !== 'production') {
+      return {
+        id: `dev_order_${params.receipt}_${Date.now()}`,
+        amount: params.amountPaise,
+        currency: 'INR',
+        status: 'created',
+        receipt: params.receipt,
+      };
+    }
+
     return this.request<RazorpayOrder>('POST', '/orders', {
       amount: params.amountPaise,
       currency: 'INR',

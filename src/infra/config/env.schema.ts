@@ -30,6 +30,13 @@ export const envSchema = z.object({
   OTP_MAX_ATTEMPTS: z.coerce.number().int().positive().default(5),
   /** Per phone, per hour. SMS costs money — this is the abuse ceiling. */
   OTP_MAX_REQUESTS_PER_HOUR: z.coerce.number().int().positive().default(3),
+  /**
+   * Per IP, per hour. Looser than the per-phone limit — a NAT/office network
+   * shares one IP across many legitimate phones — but it is what stops one
+   * attacker from spraying OTP requests across many numbers, which the
+   * per-phone limit alone cannot catch.
+   */
+  OTP_MAX_REQUESTS_PER_HOUR_PER_IP: z.coerce.number().int().positive().default(20),
 
   REDIS_URL: z.string().optional(),
 

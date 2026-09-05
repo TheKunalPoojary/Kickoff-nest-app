@@ -39,6 +39,16 @@ export class PaymentsController {
     return this.payments.getStatus(user.id, bookingId);
   }
 
+  /** Dev/staging-only. Refuses to run when NODE_ENV=production — see PaymentsService.devConfirmPayment. */
+  @Post('dev/confirm')
+  @HttpCode(HttpStatus.OK)
+  devConfirm(
+    @CurrentUser() user: AuthUser,
+    @Body(zodBody(CreateOrderSchema)) dto: CreateOrderDto,
+  ) {
+    return this.payments.devConfirmPayment(user.id, dto.bookingId);
+  }
+
   /**
    * Server-to-server, so it is @Public() — Razorpay has no bearer token. The
    * HMAC signature IS the authentication, and it is checked over the RAW body
