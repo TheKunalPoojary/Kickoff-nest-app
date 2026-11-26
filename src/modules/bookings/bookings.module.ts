@@ -2,12 +2,13 @@ import { Module } from '@nestjs/common';
 import { AvailabilityModule } from '../availability/availability.module.js';
 import { PaymentsModule } from '../payments/payments.module.js';
 import { BookingsController } from './bookings.controller.js';
+import { OwnerBookingsController } from './owner-bookings.controller.js';
 import { BookingsService } from './bookings.service.js';
 import { HoldSweeperService } from './hold-sweeper.service.js';
 
 @Module({
   imports: [AvailabilityModule, PaymentsModule],
-  controllers: [BookingsController],
+  controllers: [BookingsController, OwnerBookingsController],
   providers: [BookingsService, HoldSweeperService],
   exports: [BookingsService, HoldSweeperService],
 })

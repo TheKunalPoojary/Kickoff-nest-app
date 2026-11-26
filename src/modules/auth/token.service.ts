@@ -5,6 +5,7 @@ import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { PrismaService } from '../../infra/prisma/prisma.service.js';
 import type { Env } from '../../infra/config/env.schema.js';
 import type { UserRole } from '../../generated/prisma/enums.js';
+import { AccountUnavailableException } from '../../common/errors/domain.errors.js';
 
 export interface TokenPair {
   accessToken: string;
@@ -102,10 +103,7 @@ export class TokenService {
 
     if (session.user.isBlocked || session.user.deletedAt) {
       await this.revokeFamily(session.familyId);
-      throw new UnauthorizedException({
-        code: 'ACCOUNT_UNAVAILABLE',
-        message: 'This account is no longer active.',
-      });
+      throw new AccountUnavailableException();
     }
 
     // Mark spent before issuing the replacement, so a crash in between leaves

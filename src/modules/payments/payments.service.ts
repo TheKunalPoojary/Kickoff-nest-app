@@ -8,7 +8,13 @@ import {
 import { ConfigService } from '@nestjs/config';
 import { PrismaService } from '../../infra/prisma/prisma.service.js';
 import { RazorpayClient } from './razorpay.client.js';
-import { captureLines, isBalanced, refundLines, type LedgerLine } from './ledger.entries.js';
+import {
+  captureLines,
+  commissionFor,
+  isBalanced,
+  refundLines,
+  type LedgerLine,
+} from './ledger.entries.js';
 import { computeRefund } from '../bookings/refund-policy.js';
 import type { Env } from '../../infra/config/env.schema.js';
 
@@ -34,7 +40,7 @@ export class PaymentsService {
         id: true,
         bookingCode: true,
         status: true,
-        amountPaise: true,
+        advancePaise: true,
         holdsUntil: true,
         payment: true,
       },
@@ -68,8 +74,9 @@ export class PaymentsService {
       };
     }
 
+    // Only the advance is collected online; the balance is paid at the venue.
     const order = await this.razorpay.createOrder({
-      amountPaise: booking.amountPaise,
+      amountPaise: booking.advancePaise,
       receipt: booking.bookingCode,
       notes: { bookingId: booking.id },
     });
@@ -78,12 +85,12 @@ export class PaymentsService {
       data: {
         bookingId: booking.id,
         providerOrderId: order.id,
-        amountPaise: booking.amountPaise,
+        amountPaise: booking.advancePaise,
         status: 'CREATED',
       },
     });
 
-    return { orderId: order.id, amountPaise: booking.amountPaise, bookingId: booking.id };
+    return { orderId: order.id, amountPaise: booking.advancePaise, bookingId: booking.id };
   }
 
   /**
@@ -231,6 +238,7 @@ export class PaymentsService {
           select: {
             id: true,
             status: true,
+            amountPaise: true,
             resource: { select: { venue: { select: { id: true, commissionPct: true } } } },
           },
         },
@@ -250,6 +258,7 @@ export class PaymentsService {
     const lines = captureLines({
       venueId: venue.id,
       amountPaise: payment.amountPaise,
+      bookingAmountPaise: payment.booking.amountPaise,
       commissionPct: Number(venue.commissionPct),
     });
 
@@ -348,8 +357,9 @@ export class PaymentsService {
       return { refunded: false, reason: 'no captured payment' };
     }
 
+    // The policy applies to what was actually paid online — the advance.
     const decision = computeRefund({
-      amountPaise: booking.amountPaise,
+      amountPaise: booking.payment.amountPaise,
       startsAt: booking.startsAt,
       now: booking.cancelledAt ?? new Date(),
       cancelledByVenue,
@@ -360,9 +370,12 @@ export class PaymentsService {
     }
 
     const venue = booking.resource.venue;
-    const commissionTaken = Math.floor(
-      (booking.payment.amountPaise * Number(venue.commissionPct)) / 100,
-    );
+    // Must match exactly what captureLines took, or the reversal is skewed.
+    const commissionTaken = commissionFor({
+      capturedPaise: booking.payment.amountPaise,
+      bookingAmountPaise: booking.amountPaise,
+      commissionPct: Number(venue.commissionPct),
+    });
 
     const lines = refundLines({
       venueId: venue.id,

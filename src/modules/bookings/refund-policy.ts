@@ -2,7 +2,7 @@ export type RefundTier =
   | 'FULL_EARLY'
   | 'HALF_LATE'
   | 'NONE_LAST_MINUTE'
-  | 'FULL_VENUE_FAULT'
+  | 'NONE_VENUE_CANCELLED'
   | 'ALREADY_STARTED';
 
 export interface RefundDecision {
@@ -17,8 +17,9 @@ export interface RefundInput {
   startsAt: Date;
   now: Date;
   /**
-   * Owner or admin cancellation. The user did nothing wrong, so the notice
-   * tiers do not apply — they are always made whole.
+   * Owner or admin cancellation from the portal. Business rule: the online
+   * payment is a slot-booking advance and is non-refundable when the venue
+   * cancels, so the notice tiers do not apply.
    */
   cancelledByVenue?: boolean;
 }
@@ -40,9 +41,9 @@ export function computeRefund(input: RefundInput): RefundDecision {
 
   if (cancelledByVenue) {
     return {
-      refundPaise: amountPaise,
-      tier: 'FULL_VENUE_FAULT',
-      reason: 'The venue cancelled this booking, so you are refunded in full.',
+      refundPaise: 0,
+      tier: 'NONE_VENUE_CANCELLED',
+      reason: 'The venue cancelled this booking. The booking advance is non-refundable.',
     };
   }
 

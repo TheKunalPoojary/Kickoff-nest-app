@@ -1,4 +1,12 @@
-import { ConflictException, ForbiddenException, NotFoundException } from '@nestjs/common';
+import {
+  BadRequestException,
+  ConflictException,
+  ForbiddenException,
+  HttpException,
+  NotFoundException,
+  ServiceUnavailableException,
+  UnauthorizedException,
+} from '@nestjs/common';
 
 /**
  * Domain exceptions carry a stable machine-readable `code` that clients branch
@@ -28,6 +36,54 @@ export class BookingNotCancellableException extends DomainError {
   }
 }
 
+export class EmailAlreadyRegisteredException extends DomainError {
+  constructor() {
+    super('EMAIL_ALREADY_REGISTERED', 'An account with this email already exists.');
+  }
+}
+
+export class PasswordAlreadySetException extends DomainError {
+  constructor() {
+    super(
+      'PASSWORD_ALREADY_SET',
+      'This account already has a password. Use "forgot password" to change it.',
+    );
+  }
+}
+
+export class PasswordLoginRequiredException extends DomainError {
+  constructor() {
+    super(
+      'PASSWORD_LOGIN_REQUIRED',
+      'This account already has a password. Sign in with it, or use "forgot password".',
+    );
+  }
+}
+
+// 401s — not a DomainError, which is hard-wired to 409. Follows the
+// VenueNotFoundException / NotVenueOwnerException pattern instead: extend the
+// right HTTP exception and attach `code` directly.
+export class InvalidCredentialsException extends UnauthorizedException {
+  readonly code = 'INVALID_CREDENTIALS';
+  constructor() {
+    super({ code: 'INVALID_CREDENTIALS', message: 'Incorrect email, phone number or password.' });
+  }
+}
+
+export class GoogleTokenInvalidException extends UnauthorizedException {
+  readonly code = 'GOOGLE_TOKEN_INVALID';
+  constructor() {
+    super({ code: 'GOOGLE_TOKEN_INVALID', message: 'Could not verify your Google sign-in.' });
+  }
+}
+
+export class AccountUnavailableException extends UnauthorizedException {
+  readonly code = 'ACCOUNT_UNAVAILABLE';
+  constructor() {
+    super({ code: 'ACCOUNT_UNAVAILABLE', message: 'This account is no longer active.' });
+  }
+}
+
 export class VenueNotFoundException extends NotFoundException {
   readonly code = 'VENUE_NOT_FOUND';
   constructor() {
@@ -43,6 +99,46 @@ export class NotVenueOwnerException extends ForbiddenException {
   readonly code = 'NOT_VENUE_OWNER';
   constructor() {
     super({ code: 'NOT_VENUE_OWNER', message: 'You do not manage this venue.' });
+  }
+}
+
+/** Admin has switched the app into maintenance from the portal. */
+export class MaintenanceModeException extends ServiceUnavailableException {
+  readonly code = 'MAINTENANCE';
+  constructor(message: string) {
+    super({
+      code: 'MAINTENANCE',
+      message: message || 'Kickoff is down for maintenance. Please try again shortly.',
+    });
+  }
+}
+
+/** The app build is older than the admin-set minimum for its platform. */
+export class UpgradeRequiredException extends HttpException {
+  readonly code = 'UPGRADE_REQUIRED';
+  constructor(message: string, details?: { min: string; storeUrl: string }) {
+    super(
+      {
+        code: 'UPGRADE_REQUIRED',
+        message: message || 'This version of Kickoff is no longer supported. Please update.',
+        details,
+      },
+      426, // Upgrade Required — not in Nest's HttpStatus enum
+    );
+  }
+}
+
+export class InvalidUploadException extends BadRequestException {
+  readonly code = 'INVALID_UPLOAD';
+  constructor(message: string) {
+    super({ code: 'INVALID_UPLOAD', message });
+  }
+}
+
+export class BookingNotFoundException extends NotFoundException {
+  readonly code = 'BOOKING_NOT_FOUND';
+  constructor() {
+    super({ code: 'BOOKING_NOT_FOUND', message: 'Booking not found.' });
   }
 }
 
@@ -88,3 +184,27 @@ export function hasPgCode(err: unknown, sqlState: string): boolean {
 }
 
 export const isExclusionViolation = (err: unknown) => hasPgCode(err, PG_EXCLUSION_VIOLATION);
+
+/** An owner targeted a user who is not a customer of the venue (or does not exist — deliberately indistinguishable). */
+export class AudienceOutOfScopeException extends BadRequestException {
+  readonly code = 'AUDIENCE_OUT_OF_SCOPE';
+  constructor() {
+    super({
+      code: 'AUDIENCE_OUT_OF_SCOPE',
+      message: 'Some selected users are not customers of this venue.',
+    });
+  }
+}
+
+export class PushRateLimitedException extends HttpException {
+  readonly code = 'PUSH_RATE_LIMITED';
+  constructor(limit: number) {
+    super(
+      {
+        code: 'PUSH_RATE_LIMITED',
+        message: `This venue can send ${limit} notifications per 24 hours. Try again later.`,
+      },
+      429,
+    );
+  }
+}

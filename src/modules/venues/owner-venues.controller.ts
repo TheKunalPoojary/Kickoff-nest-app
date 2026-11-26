@@ -9,8 +9,11 @@ import {
   Patch,
   Post,
   Put,
+  UploadedFile,
   UseGuards,
+  UseInterceptors,
 } from '@nestjs/common';
+import { FileInterceptor } from '@nestjs/platform-express';
 import { CurrentUser, type AuthUser } from '../../common/decorators/current-user.decorator.js';
 import { Roles } from '../../common/decorators/roles.decorator.js';
 import { VenueOwnershipGuard } from '../../common/guards/venue-ownership.guard.js';
@@ -19,15 +22,17 @@ import {
   CreateResourceSchema,
   CreateVenueSchema,
   OperatingHoursSchema,
+  RemovePhotoSchema,
   UpdateResourceSchema,
   UpdateVenueSchema,
   type CreateResourceDto,
   type CreateVenueDto,
   type OperatingHoursDto,
+  type RemovePhotoDto,
   type UpdateResourceDto,
   type UpdateVenueDto,
 } from './owner.schemas.js';
-import { OwnerVenuesService } from './owner-venues.service.js';
+import { MAX_PHOTO_BYTES, OwnerVenuesService } from './owner-venues.service.js';
 
 /**
  * Every route here needs BOTH checks:
@@ -52,6 +57,34 @@ export class OwnerVenuesController {
     @Body(zodBody(CreateVenueSchema)) dto: CreateVenueDto,
   ) {
     return this.owner.createVenue(user.id, dto);
+  }
+
+  @Get('venues/:venueId')
+  @UseGuards(VenueOwnershipGuard)
+  getVenue(@Param('venueId') venueId: string) {
+    return this.owner.getMine(venueId);
+  }
+
+  @Post('venues/:venueId/photos')
+  @UseGuards(VenueOwnershipGuard)
+  // Multer's own limit stops an oversized body before it is buffered whole;
+  // +1 byte so the service, not multer, reports the friendly size error.
+  @UseInterceptors(FileInterceptor('file', { limits: { fileSize: MAX_PHOTO_BYTES + 1, files: 1 } }))
+  addPhoto(
+    @Param('venueId') venueId: string,
+    @UploadedFile() file: { buffer: Buffer; size: number } | undefined,
+  ) {
+    return this.owner.addPhoto(venueId, file);
+  }
+
+  @Delete('venues/:venueId/photos')
+  @UseGuards(VenueOwnershipGuard)
+  @HttpCode(HttpStatus.OK)
+  removePhoto(
+    @Param('venueId') venueId: string,
+    @Body(zodBody(RemovePhotoSchema)) dto: RemovePhotoDto,
+  ) {
+    return this.owner.removePhoto(venueId, dto.url);
   }
 
   @Patch('venues/:venueId')

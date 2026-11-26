@@ -34,6 +34,13 @@ enum BookingStatus {
   NO_SHOW
 }
 
+/// APP = booked by a player in the mobile app (advance paid online).
+/// WALK_IN = entered by the owner from the portal, paid at the venue.
+enum BookingSource {
+  APP
+  WALK_IN
+}
+
 enum PaymentStatus {
   CREATED
   AUTHORIZED
@@ -89,12 +96,20 @@ enum PayoutStatus {
   FAILED
 }
 
+enum AuthProvider {
+  GOOGLE
+}
+
 // ---------------------------------------------------------------- identity
 
 model User {
   id              String    @id @default(uuid())
   phone           String?   @unique
   email           String?   @unique
+  /// Null until the user creates one — after their first OTP sign-in
+  /// (POST /auth/password/set) or via email/password registration. Google-only
+  /// users have none until they set one.
+  passwordHash    String?
   name            String?
   avatarUrl       String?
   role            UserRole  @default(USER)
@@ -122,11 +137,11 @@ model User {
 }
 
 model SocialIdentity {
-  id         String   @id @default(uuid())
+  id         String       @id @default(uuid())
   userId     String
-  provider   String // google | apple
+  provider   AuthProvider
   providerId String
-  createdAt  DateTime @default(now())
+  createdAt  DateTime     @default(now())
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
@@ -157,7 +172,8 @@ model RefreshSession {
 /// rows per phone per hour — SMS costs real money and is the #1 abuse target.
 model OtpChallenge {
   id         String    @id @default(uuid())
-  phone      String
+  /// The verified channel: an E.164 phone number or a lower-cased email.
+  identifier String
   codeHash   String
   expiresAt  DateTime  @db.Timestamptz
   attempts   Int       @default(0)
@@ -166,7 +182,7 @@ model OtpChallenge {
   /** Request-time client IP, for the per-IP rate limit. Null for older rows. */
   ipAddress  String?
 
-  @@index([phone, createdAt])
+  @@index([identifier, createdAt])
   @@index([ipAddress, createdAt])
   @@index([expiresAt])
 }
@@ -181,6 +197,54 @@ model Device {
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@index([userId])
+}
+
+enum PushStatus {
+  QUEUED
+  SENDING
+  SENT
+  FAILED
+}
+
+/// One admin/owner-initiated push campaign. Plain ids (no FKs), like AuditLog:
+/// the record must outlive a deleted sender or venue.
+model PushMessage {
+  id             String     @id @default(uuid())
+  senderId       String
+  senderRole     String
+  /// Set when an owner sent it (scope = that venue's customers), or when an
+  /// admin targeted one venue's customers.
+  venueId        String?
+  title          String
+  body           String
+  /// The audience exactly as requested, e.g. { type: "USERS", userIds: [...] }.
+  audience       Json
+  status         PushStatus @default(QUEUED)
+  recipientCount Int        @default(0)
+  deviceCount    Int        @default(0)
+  sentCount      Int        @default(0)
+  failedCount    Int        @default(0)
+  createdAt      DateTime   @default(now())
+  completedAt    DateTime?  @db.Timestamptz
+
+  @@index([senderId, createdAt])
+  @@index([venueId, createdAt])
+  @@index([createdAt])
+}
+
+/// Login attempts for email/password sign-in, hand-rolled rate limiting —
+/// mirrors OtpChallenge's per-identifier/per-IP counting since
+/// @nestjs/throttler has no Nest 12 support.
+model LoginAttempt {
+  id        String   @id @default(uuid())
+  /// Phone (E.164) or lower-cased email, whichever the caller logged in with.
+  identifier String
+  success   Boolean
+  ipAddress String?
+  createdAt DateTime @default(now())
+
+  @@index([identifier, createdAt])
+  @@index([ipAddress, createdAt])
 }
 
 // ---------------------------------------------------------------- catalog
@@ -207,6 +271,9 @@ model Venue {
   ratingAvg     Float       @default(0)
   ratingCount   Int         @default(0)
   commissionPct Decimal     @default(10.00) @db.Decimal(5, 2)
+  /// Share of the booking price paid online at booking time; the rest is
+  /// collected at the venue. 100 = full prepayment.
+  advancePct    Int         @default(100)
   createdAt     DateTime    @default(now())
   updatedAt     DateTime    @updatedAt
   deletedAt     DateTime?
@@ -323,7 +390,18 @@ model Booking {
   startsAt         DateTime      @db.Timestamptz
   endsAt           DateTime      @db.Timestamptz
   status           BookingStatus
+  source           BookingSource @default(APP)
+  /// Full price of the slot(s).
   amountPaise      Int
+  /// Paid online at booking time. 0 for walk-ins.
+  advancePaise     Int           @default(0)
+  /// Collected at the venue by the owner (cash/UPI), recorded from the portal.
+  balanceCollectedPaise Int      @default(0)
+  balanceCollectedAt    DateTime? @db.Timestamptz
+  /// Walk-ins only — the customer may have no account. `userId` is then the
+  /// owner who entered the booking.
+  customerName     String?
+  customerPhone    String?
   platformFeePaise Int           @default(0)
   taxPaise         Int           @default(0)
   holdsUntil       DateTime?     @db.Timestamptz
@@ -516,6 +594,15 @@ model Review {
 
   @@unique([venueId, userId])
   @@index([venueId, createdAt])
+}
+
+/// Runtime-tunable app settings (version gates, maintenance, feature flags),
+/// edited by ADMIN from the portal and read by the mobile app at launch.
+model AppSetting {
+  key       String   @id
+  value     Json
+  updatedBy String?
+  updatedAt DateTime @updatedAt
 }
 
 /// Who overrode what. Disputes are unresolvable without this.

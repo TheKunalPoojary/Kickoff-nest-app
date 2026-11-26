@@ -40,9 +40,59 @@ export class BlackoutsService {
     return { ...blackout, conflictingBookings: conflicting };
   }
 
-  async remove(blackoutId: string) {
-    const existing = await this.prisma.blackout.findUnique({
-      where: { id: blackoutId },
+  /** Blackouts across every resource of a venue — the portal's closures calendar. */
+  listForVenue(venueId: string, from?: Date) {
+    return this.prisma.blackout.findMany({
+      where: { resource: { venueId, deletedAt: null }, endsAt: { gte: from ?? new Date() } },
+      select: {
+        id: true,
+        resourceId: true,
+        startsAt: true,
+        endsAt: true,
+        reason: true,
+        createdAt: true,
+        resource: { select: { name: true } },
+      },
+      orderBy: { startsAt: 'asc' },
+    });
+  }
+
+  /**
+   * Closes the whole venue for a range — one blackout per active resource, in
+   * one transaction so a failure never leaves the venue half-closed.
+   */
+  async closeVenue(venueId: string, createdBy: string, dto: CreateBlackoutDto) {
+    const resources = await this.prisma.resource.findMany({
+      where: { venueId, isActive: true, deletedAt: null },
+      select: { id: true },
+    });
+    const resourceIds = resources.map((r) => r.id);
+
+    const [conflicting, created] = await this.prisma.$transaction([
+      this.prisma.booking.count({
+        where: {
+          resourceId: { in: resourceIds },
+          status: { in: ['PENDING_PAYMENT', 'CONFIRMED'] },
+          startsAt: { lt: dto.endsAt },
+          endsAt: { gt: dto.startsAt },
+        },
+      }),
+      this.prisma.blackout.createMany({
+        data: resourceIds.map((resourceId) => ({ resourceId, createdBy, ...dto })),
+      }),
+    ]);
+
+    return { resourcesClosed: created.count, conflictingBookings: conflicting };
+  }
+
+  /**
+   * Scoped to the resource the ownership guard checked. Looking the blackout up
+   * by id alone would let an owner delete another venue's blackout by pairing
+   * their own resource id with someone else's blackout id.
+   */
+  async remove(resourceId: string, blackoutId: string) {
+    const existing = await this.prisma.blackout.findFirst({
+      where: { id: blackoutId, resourceId },
       select: { id: true },
     });
     if (!existing) {

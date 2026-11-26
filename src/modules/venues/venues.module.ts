@@ -7,6 +7,6 @@ import { VenuesService } from './venues.service.js';
 @Module({
   controllers: [VenuesController, OwnerVenuesController],
   providers: [VenuesService, OwnerVenuesService],
-  exports: [VenuesService],
+  exports: [VenuesService, OwnerVenuesService],
 })
 export class VenuesModule {}

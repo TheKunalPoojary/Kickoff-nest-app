@@ -14,20 +14,45 @@ export const ACCOUNT = {
 } as const;
 
 /**
+ * Platform commission on a captured payment.
+ *
+ * Charged on the FULL booking price, not just the online advance — the rest is
+ * collected at the venue in cash the platform never sees, so this is the only
+ * point it can be taken. Capped at what was actually captured, so the owner's
+ * share can never go negative.
+ */
+export function commissionFor(params: {
+  capturedPaise: number;
+  bookingAmountPaise: number;
+  commissionPct: number;
+}): number {
+  const { capturedPaise, bookingAmountPaise, commissionPct } = params;
+  return Math.min(capturedPaise, Math.floor((bookingAmountPaise * commissionPct) / 100));
+}
+
+/**
  * Double-entry: every transaction's lines must sum to zero (debits === credits).
  * Splitting a captured payment is where rounding quietly loses paise, so the
  * remainder is always derived by subtraction rather than computed twice.
  */
 export function captureLines(params: {
   venueId: string;
+  /** What was captured online — the advance. */
   amountPaise: number;
+  /** Full booking price; defaults to the captured amount (full prepayment). */
+  bookingAmountPaise?: number;
   commissionPct: number;
 }): LedgerLine[] {
   const { venueId, amountPaise, commissionPct } = params;
+  const bookingAmountPaise = params.bookingAmountPaise ?? amountPaise;
 
   // Floor, then take the owner's share as the remainder — that way the two
   // parts always add back to exactly the amount captured.
-  const commissionPaise = Math.floor((amountPaise * commissionPct) / 100);
+  const commissionPaise = commissionFor({
+    capturedPaise: amountPaise,
+    bookingAmountPaise,
+    commissionPct,
+  });
   const ownerPaise = amountPaise - commissionPaise;
 
   return [

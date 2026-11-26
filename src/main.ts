@@ -1,6 +1,7 @@
 import { Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { NestFactory } from '@nestjs/core';
+import type { NestExpressApplication } from '@nestjs/platform-express';
 import type { NextFunction, Request, Response } from 'express';
 import { AppModule } from './app.module.js';
 import { AllExceptionsFilter } from './common/filters/all-exceptions.filter.js';
@@ -9,8 +10,20 @@ import type { Env } from './infra/config/env.schema.js';
 async function bootstrap() {
   // rawBody is required to verify the Razorpay webhook HMAC: re-serialising a
   // parsed body changes the bytes and invalidates the signature.
-  const app = await NestFactory.create(AppModule, { rawBody: true });
+  const app = await NestFactory.create<NestExpressApplication>(AppModule, { rawBody: true });
   const config = app.get(ConfigService<Env, true>);
+
+  // Only the portal's origin(s). The mobile app is not a browser and is
+  // unaffected; a wildcard here would let any website drive a signed-in
+  // owner's session from their browser.
+  app.enableCors({ origin: config.get('CORS_ORIGINS', { infer: true }) });
+
+  // Uploaded venue photos. Outside the API prefix and the guards — they are
+  // public images. nosniff so a browser never reinterprets one as HTML/script.
+  app.useStaticAssets(config.get('UPLOAD_DIR', { infer: true }), {
+    prefix: '/uploads/',
+    setHeaders: (res) => res.setHeader('X-Content-Type-Options', 'nosniff'),
+  });
 
   // `health` sits outside the version prefix so uptime monitors and the load
   // balancer have a stable URL that survives an API version bump.

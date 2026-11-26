@@ -1,26 +1,48 @@
-import { ConflictException, Injectable, Logger, NotFoundException } from '@nestjs/common';
+import {
+  BadRequestException,
+  ConflictException,
+  Injectable,
+  Logger,
+  NotFoundException,
+} from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { formatInTimeZone } from 'date-fns-tz';
 import { PrismaService } from '../../infra/prisma/prisma.service.js';
 import { AvailabilityService, type Slot } from '../availability/availability.service.js';
 import {
   BookingNotCancellableException,
+  BookingNotFoundException,
   SlotUnavailableException,
   isExclusionViolation,
 } from '../../common/errors/domain.errors.js';
 import { computeRefund } from './refund-policy.js';
 import { PaymentsService } from '../payments/payments.service.js';
 import { generateBookingCode } from './booking-code.js';
+import { computeAdvance } from './advance.js';
 import type { Env } from '../../infra/config/env.schema.js';
-import type { CancelBookingDto, CreateBookingDto, ListBookingsDto } from './booking.schemas.js';
+import type {
+  CancelBookingDto,
+  CollectBalanceDto,
+  CreateBookingDto,
+  CreateManualBookingDto,
+  ListBookingsDto,
+  OwnerBookingsQueryDto,
+  OwnerSummaryQueryDto,
+} from './booking.schemas.js';
 
 const BOOKING_SELECT = {
   id: true,
   bookingCode: true,
   status: true,
+  source: true,
   startsAt: true,
   endsAt: true,
   amountPaise: true,
+  advancePaise: true,
+  balanceCollectedPaise: true,
+  balanceCollectedAt: true,
+  customerName: true,
+  customerPhone: true,
   holdsUntil: true,
   cancelledAt: true,
   cancelReason: true,
@@ -66,26 +88,78 @@ export class BookingsService {
 
     const plan = await this.planBooking(dto);
 
+    return this.withStaleHoldRetry(dto.resourceId, plan, () =>
+      this.insert(userId, dto, plan, idempotencyKey),
+    );
+  }
+
+  /**
+   * A booking entered by the owner from the portal — walk-in or phone. Paid at
+   * the venue, so it is CONFIRMED immediately with no hold and no payment row.
+   *
+   * It goes through exactly the same validation and the same exclusion
+   * constraint as an app booking: a walk-in racing an app checkout for one slot
+   * must still produce exactly one winner.
+   */
+  async createManual(ownerId: string, resourceId: string, dto: CreateManualBookingDto) {
+    const slotDto: CreateBookingDto = { resourceId, startsAt: dto.startsAt, slots: dto.slots };
+    const plan = await this.planBooking(slotDto);
+
+    if (dto.collectedPaise > plan.amountPaise) {
+      throw new BadRequestException({
+        code: 'VALIDATION_FAILED',
+        message: 'Collected amount cannot exceed the booking price.',
+      });
+    }
+
+    return this.withStaleHoldRetry(resourceId, plan, async () => {
+      const booking = await this.prisma.booking.create({
+        data: {
+          bookingCode: generateBookingCode(),
+          userId: ownerId,
+          resourceId,
+          startsAt: plan.startsAt,
+          endsAt: plan.endsAt,
+          status: 'CONFIRMED',
+          source: 'WALK_IN',
+          amountPaise: plan.amountPaise,
+          advancePaise: 0,
+          balanceCollectedPaise: dto.collectedPaise,
+          balanceCollectedAt: dto.collectedPaise > 0 ? new Date() : null,
+          customerName: dto.customerName,
+          customerPhone: dto.customerPhone,
+        },
+        select: BOOKING_SELECT,
+      });
+      return this.present(booking);
+    });
+  }
+
+  /**
+   * The constraint's WHERE clause cannot reference now(), so an expired but
+   * unswept hold still blocks the slot. On a conflict, clear those and retry
+   * EXACTLY once — a retry loop under contention turns a single lost race into
+   * a thundering herd against the same slot.
+   */
+  private async withStaleHoldRetry<T>(
+    resourceId: string,
+    plan: BookingPlan,
+    insert: () => Promise<T>,
+  ): Promise<T> {
     try {
-      return await this.insert(userId, dto, plan, idempotencyKey);
+      return await insert();
     } catch (err) {
       if (!isExclusionViolation(err)) throw err;
 
-      // The constraint's WHERE clause cannot reference now(), so an expired
-      // but unswept hold still blocks the slot. Clear those and retry ONCE.
-      const cleared = await this.expireStaleOverlapping(dto.resourceId, plan.startsAt, plan.endsAt);
-      if (cleared === 0) throw new SlotUnavailableException({ resourceId: dto.resourceId });
+      const cleared = await this.expireStaleOverlapping(resourceId, plan.startsAt, plan.endsAt);
+      if (cleared === 0) throw new SlotUnavailableException({ resourceId });
 
       this.logger.debug(`Cleared ${cleared} stale hold(s); retrying booking once`);
 
       try {
-        return await this.insert(userId, dto, plan, idempotencyKey);
+        return await insert();
       } catch (retryErr) {
-        // Exactly once. A retry loop under contention turns a single lost race
-        // into a thundering herd against the same slot.
-        if (isExclusionViolation(retryErr)) {
-          throw new SlotUnavailableException({ resourceId: dto.resourceId });
-        }
+        if (isExclusionViolation(retryErr)) throw new SlotUnavailableException({ resourceId });
         throw retryErr;
       }
     }
@@ -110,6 +184,7 @@ export class BookingsService {
         endsAt: plan.endsAt,
         status: 'PENDING_PAYMENT',
         amountPaise: plan.amountPaise,
+        advancePaise: plan.advancePaise,
         holdsUntil: new Date(Date.now() + holdMinutes * 60_000),
         idempotencyKey,
       },
@@ -127,7 +202,11 @@ export class BookingsService {
   private async planBooking(dto: CreateBookingDto): Promise<BookingPlan> {
     const resource = await this.prisma.resource.findFirst({
       where: { id: dto.resourceId, isActive: true, deletedAt: null },
-      select: { id: true, bufferMins: true, venue: { select: { timezone: true } } },
+      select: {
+        id: true,
+        bufferMins: true,
+        venue: { select: { timezone: true, advancePct: true } },
+      },
     });
 
     if (!resource) {
@@ -194,12 +273,14 @@ export class BookingsService {
     }
 
     const playEnd = new Date(chosen.at(-1)!.endsAt);
+    const amountPaise = chosen.reduce((sum, s) => sum + s.pricePaise, 0);
 
     return {
       startsAt: dto.startsAt,
       endsAt: new Date(playEnd.getTime() + resource.bufferMins * 60_000),
       playEndsAt: playEnd,
-      amountPaise: chosen.reduce((sum, s) => sum + s.pricePaise, 0),
+      amountPaise,
+      advancePaise: computeAdvance(amountPaise, resource.venue.advancePct),
       bufferMins: resource.bufferMins,
     };
   }
@@ -230,6 +311,9 @@ export class BookingsService {
       .findMany({
         where: {
           userId,
+          // Walk-ins are stored against the owner who entered them; they are
+          // not the owner's own bookings.
+          source: 'APP',
           ...(query.status ? { status: query.status } : {}),
           ...(query.scope === 'upcoming'
             ? { startsAt: { gte: now }, status: { in: ['PENDING_PAYMENT', 'CONFIRMED'] } }
@@ -265,15 +349,16 @@ export class BookingsService {
   async previewCancellation(userId: string, bookingId: string) {
     const booking = await this.prisma.booking.findFirst({
       where: { id: bookingId, userId },
-      select: { status: true, amountPaise: true, startsAt: true },
+      select: { status: true, advancePaise: true, startsAt: true },
     });
 
     if (!booking) {
       throw new NotFoundException({ code: 'BOOKING_NOT_FOUND', message: 'Booking not found.' });
     }
 
+    // Only the advance was paid online, so only the advance can come back.
     const decision = computeRefund({
-      amountPaise: booking.amountPaise,
+      amountPaise: booking.advancePaise,
       startsAt: booking.startsAt,
       now: new Date(),
     });
@@ -284,7 +369,7 @@ export class BookingsService {
   async cancel(userId: string, bookingId: string, dto: CancelBookingDto) {
     const booking = await this.prisma.booking.findFirst({
       where: { id: bookingId, userId },
-      select: { id: true, status: true, amountPaise: true, startsAt: true },
+      select: { id: true, status: true, advancePaise: true, startsAt: true },
     });
 
     if (!booking) {
@@ -296,7 +381,7 @@ export class BookingsService {
     }
 
     const decision = computeRefund({
-      amountPaise: booking.amountPaise,
+      amountPaise: booking.advancePaise,
       startsAt: booking.startsAt,
       now: new Date(),
     });
@@ -329,6 +414,161 @@ export class BookingsService {
     return { booking: this.present(updated), refund: decision, refundIssued };
   }
 
+  // ------------------------------------------------------------ owner portal
+
+  /** Bookings at one venue in a time window, for the portal's day grid and list. */
+  async listForVenue(venueId: string, query: OwnerBookingsQueryDto) {
+    const rows = await this.prisma.booking.findMany({
+      where: {
+        resource: { venueId },
+        startsAt: { gte: query.from, lt: query.to },
+        ...(query.resourceId ? { resourceId: query.resourceId } : {}),
+        ...(query.status ? { status: query.status } : {}),
+        ...(query.source ? { source: query.source } : {}),
+      },
+      select: {
+        ...BOOKING_SELECT,
+        user: { select: { id: true, name: true, phone: true, email: true } },
+      },
+      orderBy: { startsAt: 'asc' },
+      take: query.limit,
+    });
+    return rows.map((r) => this.present(r));
+  }
+
+  /** Headline numbers for the owner dashboard over a time window. */
+  async summaryForVenue(venueId: string, query: OwnerSummaryQueryDto) {
+    const groups = await this.prisma.booking.groupBy({
+      by: ['status', 'source'],
+      where: { resource: { venueId }, startsAt: { gte: query.from, lt: query.to } },
+      _count: { _all: true },
+      _sum: { amountPaise: true, advancePaise: true, balanceCollectedPaise: true },
+    });
+
+    const live = groups.filter((g) => g.status === 'CONFIRMED' || g.status === 'COMPLETED');
+    const sum = (rows: typeof groups, field: 'amountPaise' | 'advancePaise' | 'balanceCollectedPaise') =>
+      rows.reduce((s, g) => s + (g._sum[field] ?? 0), 0);
+
+    const bookedValuePaise = sum(live, 'amountPaise');
+    const advanceCollectedPaise = sum(live, 'advancePaise');
+    const balanceCollectedPaise = sum(live, 'balanceCollectedPaise');
+
+    return {
+      from: query.from,
+      to: query.to,
+      counts: {
+        confirmed: live.reduce((s, g) => s + g._count._all, 0),
+        walkIn: live.filter((g) => g.source === 'WALK_IN').reduce((s, g) => s + g._count._all, 0),
+        pendingPayment: groups
+          .filter((g) => g.status === 'PENDING_PAYMENT')
+          .reduce((s, g) => s + g._count._all, 0),
+        cancelled: groups
+          .filter((g) => g.status === 'CANCELLED')
+          .reduce((s, g) => s + g._count._all, 0),
+      },
+      bookedValuePaise,
+      advanceCollectedPaise,
+      balanceCollectedPaise,
+      balanceDuePaise: Math.max(0, bookedValuePaise - advanceCollectedPaise - balanceCollectedPaise),
+    };
+  }
+
+  /**
+   * Owner/admin cancellation. Business rule: the online advance is
+   * non-refundable when the venue cancels (see refund-policy.ts), so this
+   * never calls the gateway — but it still goes through
+   * refundForCancellation so the policy lives in one place.
+   */
+  async cancelByVenue(actorId: string, bookingId: string, dto: CancelBookingDto) {
+    const booking = await this.prisma.booking.findUnique({
+      where: { id: bookingId },
+      select: { id: true, status: true, advancePaise: true, startsAt: true },
+    });
+    if (!booking) throw new BookingNotFoundException();
+    if (!this.isCancellable(booking.status)) {
+      throw new BookingNotCancellableException({ status: booking.status });
+    }
+
+    const decision = computeRefund({
+      amountPaise: booking.advancePaise,
+      startsAt: booking.startsAt,
+      now: new Date(),
+      cancelledByVenue: true,
+    });
+
+    const updated = await this.prisma.booking.update({
+      where: { id: bookingId },
+      data: {
+        status: 'CANCELLED',
+        cancelledAt: new Date(),
+        cancelledBy: actorId,
+        cancelReason: dto.reason,
+      },
+      select: BOOKING_SELECT,
+    });
+
+    let refundIssued = false;
+    try {
+      refundIssued = (await this.payments.refundForCancellation(bookingId, true)).refunded;
+    } catch (err) {
+      this.logger.error(`Venue-cancelled booking ${bookingId} refund step failed: ${String(err)}`);
+    }
+
+    return { booking: this.present(updated), refund: decision, refundIssued };
+  }
+
+  /** Records money the owner took at the venue (cash/UPI) against the balance. */
+  async collectBalance(bookingId: string, dto: CollectBalanceDto) {
+    const booking = await this.prisma.booking.findUnique({
+      where: { id: bookingId },
+      select: {
+        status: true,
+        amountPaise: true,
+        advancePaise: true,
+        balanceCollectedPaise: true,
+      },
+    });
+    if (!booking) throw new BookingNotFoundException();
+
+    if (booking.status !== 'CONFIRMED' && booking.status !== 'COMPLETED') {
+      throw new ConflictException({
+        code: 'BOOKING_NOT_COLLECTABLE',
+        message: `A ${booking.status.toLowerCase()} booking has no balance to collect.`,
+      });
+    }
+
+    const due = booking.amountPaise - booking.advancePaise - booking.balanceCollectedPaise;
+    if (dto.amountPaise > due) {
+      throw new BadRequestException({
+        code: 'VALIDATION_FAILED',
+        message: `Only ₹${(due / 100).toFixed(2)} is still due on this booking.`,
+        details: { balanceDuePaise: due },
+      });
+    }
+
+    // Optimistic: only applies if nobody else recorded a payment in between,
+    // so two staff tapping "collected" at once cannot double-count.
+    const result = await this.prisma.booking.updateMany({
+      where: { id: bookingId, balanceCollectedPaise: booking.balanceCollectedPaise },
+      data: {
+        balanceCollectedPaise: booking.balanceCollectedPaise + dto.amountPaise,
+        balanceCollectedAt: new Date(),
+      },
+    });
+    if (result.count === 0) {
+      throw new ConflictException({
+        code: 'CONCURRENT_UPDATE',
+        message: 'This booking was just updated. Refresh and try again.',
+      });
+    }
+
+    const updated = await this.prisma.booking.findUniqueOrThrow({
+      where: { id: bookingId },
+      select: BOOKING_SELECT,
+    });
+    return this.present(updated);
+  }
+
   private isCancellable(status: string): boolean {
     return status === 'PENDING_PAYMENT' || status === 'CONFIRMED';
   }
@@ -337,9 +577,22 @@ export class BookingsService {
    * `endsAt` includes the cleanup buffer, which is an implementation detail of
    * the exclusion constraint. Clients must see the play window.
    */
-  private present<T extends { endsAt: Date; resource: { bufferMins: number } }>(booking: T) {
+  private present<
+    T extends {
+      endsAt: Date;
+      amountPaise: number;
+      advancePaise: number;
+      balanceCollectedPaise: number;
+      resource: { bufferMins: number };
+    },
+  >(booking: T) {
     return {
       ...booking,
+      // What the customer still owes at the venue.
+      balanceDuePaise: Math.max(
+        0,
+        booking.amountPaise - booking.advancePaise - booking.balanceCollectedPaise,
+      ),
       endsAt: new Date(booking.endsAt.getTime() - booking.resource.bufferMins * 60_000),
       occupiedUntil: booking.endsAt,
     };
@@ -352,5 +605,7 @@ interface BookingPlan {
   endsAt: Date;
   playEndsAt: Date;
   amountPaise: number;
+  /** Paid online to hold the slot; computed from Venue.advancePct. */
+  advancePaise: number;
   bufferMins: number;
 }

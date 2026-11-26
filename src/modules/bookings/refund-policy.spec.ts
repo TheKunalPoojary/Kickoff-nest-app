@@ -39,9 +39,8 @@ describe('computeRefund', () => {
     });
   });
 
-  it('refunds in full when the venue cancels, whatever the notice', () => {
-    // Even one minute out, and even after the slot started: the user did
-    // nothing wrong.
+  it('refunds nothing when the venue cancels, whatever the notice', () => {
+    // Business rule: the online payment is a non-refundable booking advance.
     for (const hours of [72, 12, 1, 0, -2]) {
       expect(
         computeRefund({
@@ -50,7 +49,7 @@ describe('computeRefund', () => {
           now: NOW,
           cancelledByVenue: true,
         }),
-      ).toMatchObject({ refundPaise: AMOUNT, tier: 'FULL_VENUE_FAULT' });
+      ).toMatchObject({ refundPaise: 0, tier: 'NONE_VENUE_CANCELLED' });
     }
   });
 

@@ -13,6 +13,8 @@ export class UsersController {
       select: {
         id: true,
         phone: true,
+        passwordHash: true,
+        email: true,
         name: true,
         avatarUrl: true,
         role: true,
@@ -26,6 +28,7 @@ export class UsersController {
       throw new NotFoundException({ code: 'USER_NOT_FOUND', message: 'User not found.' });
     }
 
-    return user;
+    const { passwordHash, ...profile } = user;
+    return { ...profile, hasPassword: passwordHash !== null };
   }
 }

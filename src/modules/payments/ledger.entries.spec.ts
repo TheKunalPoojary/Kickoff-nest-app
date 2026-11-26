@@ -1,5 +1,11 @@
 import { describe, expect, it } from 'vitest';
-import { ACCOUNT, captureLines, isBalanced, refundLines } from './ledger.entries.js';
+import {
+  ACCOUNT,
+  captureLines,
+  commissionFor,
+  isBalanced,
+  refundLines,
+} from './ledger.entries.js';
 
 const sumOf = (lines: ReturnType<typeof captureLines>, account: string) =>
   lines.filter((l) => l.account === account).reduce((s, l) => s + l.amountPaise, 0);
@@ -128,5 +134,49 @@ describe('refundLines', () => {
     });
     expect(lines).toEqual([]);
     expect(isBalanced(lines)).toBe(true);
+  });
+});
+
+describe('advance payments', () => {
+  it('charges commission on the full booking price, out of the advance', () => {
+    // ₹1500 booking, 30% advance (₹450), 10% commission on ₹1500 = ₹150.
+    const lines = captureLines({
+      venueId: 'v1',
+      amountPaise: 45_000,
+      bookingAmountPaise: 150_000,
+      commissionPct: 10,
+    });
+    expect(isBalanced(lines)).toBe(true);
+    expect(sumOf(lines, ACCOUNT.COMMISSION)).toBe(15_000);
+    expect(sumOf(lines, ACCOUNT.ownerPayable('v1'))).toBe(30_000);
+  });
+
+  it('caps commission at the advance so the owner share never goes negative', () => {
+    // 5% advance (₹75) but 10% commission on ₹1500 is ₹150.
+    const lines = captureLines({
+      venueId: 'v1',
+      amountPaise: 7_500,
+      bookingAmountPaise: 150_000,
+      commissionPct: 10,
+    });
+    expect(isBalanced(lines)).toBe(true);
+    expect(sumOf(lines, ACCOUNT.COMMISSION)).toBe(7_500);
+    expect(sumOf(lines, ACCOUNT.ownerPayable('v1'))).toBe(0);
+  });
+
+  it('refund reversal uses the same commission the capture took', () => {
+    const commission = commissionFor({
+      capturedPaise: 45_000,
+      bookingAmountPaise: 150_000,
+      commissionPct: 10,
+    });
+    const lines = refundLines({
+      venueId: 'v1',
+      refundPaise: 45_000,
+      originalAmountPaise: 45_000,
+      originalCommissionPaise: commission,
+    });
+    expect(isBalanced(lines)).toBe(true);
+    expect(sumOf(lines, ACCOUNT.COMMISSION)).toBe(15_000);
   });
 });

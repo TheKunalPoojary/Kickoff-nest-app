@@ -1,6 +1,8 @@
 import 'dotenv/config';
 import { PrismaPg } from '@prisma/adapter-pg';
 import { PrismaClient } from '../src/generated/prisma/client.js';
+import { hashPassword } from '../src/modules/auth/password.util.js';
+import { DEFAULT_APP_SETTINGS } from '../src/modules/app-config/app-config.schemas.js';
 
 /**
  * Development seed. Idempotent — every write is an upsert against a fixed id,
@@ -20,18 +22,48 @@ const HOUR = 60;
 
 async function main() {
   // ---------------------------------------------------------------- owners
+  // Dev-only portal logins. Passwords come from env so nothing real is ever
+  // committed; the fallbacks exist purely for a local checkout.
+  const ownerPasswordHash = await hashPassword(
+    process.env.SEED_OWNER_PASSWORD ?? 'owner-dev-1234',
+  );
+  const adminPasswordHash = await hashPassword(
+    process.env.SEED_ADMIN_PASSWORD ?? 'admin-dev-1234',
+  );
+
   const owner = await prisma.user.upsert({
     where: { id: 'seed-owner-1' },
     create: {
       id: 'seed-owner-1',
       phone: '+919000000001',
+      email: 'owner@kickoff.local',
+      passwordHash: ownerPasswordHash,
       name: 'Ravi Deshpande',
       role: 'VENUE_OWNER',
       city: 'Pune',
       preferredSports: ['football'],
     },
-    update: { role: 'VENUE_OWNER' },
+    update: { role: 'VENUE_OWNER', email: 'owner@kickoff.local', passwordHash: ownerPasswordHash },
   });
+
+  const admin = await prisma.user.upsert({
+    where: { id: 'seed-admin-1' },
+    create: {
+      id: 'seed-admin-1',
+      email: 'admin@kickoff.local',
+      passwordHash: adminPasswordHash,
+      name: 'Kickoff Admin',
+      role: 'ADMIN',
+      preferredSports: [],
+    },
+    update: { role: 'ADMIN', passwordHash: adminPasswordHash },
+  });
+
+  // Only create missing keys — re-seeding must not clobber settings an admin
+  // has since changed from the portal.
+  for (const [key, value] of Object.entries(DEFAULT_APP_SETTINGS)) {
+    await prisma.appSetting.upsert({ where: { key }, create: { key, value }, update: {} });
+  }
 
   const player = await prisma.user.upsert({
     where: { id: 'seed-player-1' },
@@ -266,7 +298,7 @@ async function main() {
 
   console.log(
     `Seeded: ${venueCount} venues, ${resourceCount} resources, ${ruleCount} price rules ` +
-      `(owner ${owner.phone}, player ${player.phone})`,
+      `(owner ${owner.email}, admin ${admin.email}, player ${player.phone})`,
   );
 }
 

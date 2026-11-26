@@ -126,7 +126,9 @@ export class VenuesService {
         SELECT
           v."id", v."name", v."slug", v."description", v."addressLine",
           v."city", v."state", v."pincode", v."lat", v."lng",
-          v."photos", v."amenities", v."ratingAvg", v."ratingCount",
+          COALESCE(v."photos", ARRAY[]::text[]) AS "photos",
+          COALESCE(v."amenities", ARRAY[]::text[]) AS "amenities",
+          v."ratingAvg", v."ratingCount",
           (
             SELECT MIN(r2."basePricePaise") FROM "Resource" r2
             WHERE r2."venueId" = v."id" AND r2."isActive" = true AND r2."deletedAt" IS NULL
@@ -203,7 +205,9 @@ export class VenuesService {
       throw new NotFoundException({ code: 'VENUE_NOT_FOUND', message: 'Venue not found.' });
     }
 
-    return venue;
+    // Prisma leaves a scalar list NULL (not []) when a row is created without
+    // it, so normalise: clients index `photos[0]` unconditionally.
+    return { ...venue, photos: venue.photos ?? [], amenities: venue.amenities ?? [] };
   }
 
   async listResources(venueId: string) {

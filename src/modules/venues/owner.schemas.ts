@@ -62,6 +62,9 @@ export const OperatingHoursSchema = z.object({
     }),
 });
 
+export const RemovePhotoSchema = z.object({ url: z.string().url() });
+
+export type RemovePhotoDto = z.infer<typeof RemovePhotoSchema>;
 export type CreateVenueDto = z.infer<typeof CreateVenueSchema>;
 export type UpdateVenueDto = z.infer<typeof UpdateVenueSchema>;
 export type CreateResourceDto = z.infer<typeof CreateResourceSchema>;

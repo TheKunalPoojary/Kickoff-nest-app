@@ -7,11 +7,12 @@ const base = {
   JWT_REFRESH_SECRET: 'b'.repeat(32),
 };
 
-/** Payments are optional locally but mandatory in production. */
+/** Payments and Google OAuth are optional locally but mandatory in production. */
 const productionExtras = {
   RAZORPAY_KEY_ID: 'rzp_live_x',
   RAZORPAY_KEY_SECRET: 'secret',
   RAZORPAY_WEBHOOK_SECRET: 'whsec',
+  GOOGLE_OAUTH_CLIENT_IDS: 'x.apps.googleusercontent.com',
 };
 
 describe('validateEnv', () => {
@@ -84,6 +85,25 @@ describe('validateEnv', () => {
 
       expect(() => validateEnv(env)).toThrow(new RegExp(`${missing} is required`));
     }
+  });
+
+  it('requires Google OAuth client IDs in production', () => {
+    const env: Record<string, unknown> = { ...base, ...productionExtras, NODE_ENV: 'production' };
+    delete env.GOOGLE_OAUTH_CLIENT_IDS;
+
+    expect(() => validateEnv(env)).toThrow(/GOOGLE_OAUTH_CLIENT_IDS is required/);
+  });
+
+  it('parses a comma-separated GOOGLE_OAUTH_CLIENT_IDS into an array', () => {
+    const env = validateEnv({
+      ...base,
+      GOOGLE_OAUTH_CLIENT_IDS: 'a.apps.googleusercontent.com, b.apps.googleusercontent.com',
+    });
+
+    expect(env.GOOGLE_OAUTH_CLIENT_IDS).toEqual([
+      'a.apps.googleusercontent.com',
+      'b.apps.googleusercontent.com',
+    ]);
   });
 
   it('does not require payment credentials outside production', () => {

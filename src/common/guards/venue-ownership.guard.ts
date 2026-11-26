@@ -17,7 +17,8 @@ import { PrismaService } from '../../infra/prisma/prisma.service.js';
  * owner's pricing and read their bookings. That is the classic marketplace
  * data leak, and it is why every owner-scoped route needs both.
  *
- * Resolves `:venueId` / `:id` directly, or `:resourceId` via its venue.
+ * Resolves `:venueId` / `:id` directly, or `:resourceId`, `:priceRuleId` and
+ * `:bookingId` via the venue they belong to.
  */
 @Injectable()
 export class VenueOwnershipGuard implements CanActivate {
@@ -52,6 +53,23 @@ export class VenueOwnershipGuard implements CanActivate {
   }
 
   private async resolveOwner(params: Record<string, string>): Promise<string | null> {
+    if (params.bookingId) {
+      const booking = await this.prisma.booking.findUnique({
+        where: { id: params.bookingId },
+        select: { resource: { select: { venue: { select: { ownerId: true } } } } },
+      });
+      return booking?.resource.venue.ownerId ?? null;
+    }
+
+    if (params.priceRuleId) {
+      const rule = await this.prisma.priceRule.findUnique({
+        where: { id: params.priceRuleId },
+        select: { resource: { select: { deletedAt: true, venue: { select: { ownerId: true } } } } },
+      });
+      if (!rule || rule.resource.deletedAt) return null;
+      return rule.resource.venue.ownerId;
+    }
+
     const resourceId = params.resourceId;
     if (resourceId) {
       const resource = await this.prisma.resource.findFirst({

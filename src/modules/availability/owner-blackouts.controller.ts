@@ -7,6 +7,7 @@ import {
   HttpStatus,
   Param,
   Post,
+  Query,
   UseGuards,
 } from '@nestjs/common';
 import { CurrentUser, type AuthUser } from '../../common/decorators/current-user.decorator.js';
@@ -40,7 +41,33 @@ export class OwnerBlackoutsController {
   @Delete(':resourceId/blackouts/:blackoutId')
   @UseGuards(VenueOwnershipGuard)
   @HttpCode(HttpStatus.OK)
-  remove(@Param('blackoutId') blackoutId: string) {
-    return this.blackouts.remove(blackoutId);
+  remove(@Param('resourceId') resourceId: string, @Param('blackoutId') blackoutId: string) {
+    return this.blackouts.remove(resourceId, blackoutId);
+  }
+}
+
+@Roles('VENUE_OWNER')
+@Controller('owner/venues')
+export class OwnerClosuresController {
+  constructor(private readonly blackouts: BlackoutsService) {}
+
+  @Get(':venueId/blackouts')
+  @UseGuards(VenueOwnershipGuard)
+  list(@Param('venueId') venueId: string, @Query('from') from?: string) {
+    const fromDate = from ? new Date(from) : undefined;
+    return this.blackouts.listForVenue(
+      venueId,
+      fromDate && !Number.isNaN(fromDate.getTime()) ? fromDate : undefined,
+    );
+  }
+
+  @Post(':venueId/closures')
+  @UseGuards(VenueOwnershipGuard)
+  closeVenue(
+    @Param('venueId') venueId: string,
+    @CurrentUser() user: AuthUser,
+    @Body(zodBody(CreateBlackoutSchema)) dto: CreateBlackoutDto,
+  ) {
+    return this.blackouts.closeVenue(venueId, user.id, dto);
   }
 }
